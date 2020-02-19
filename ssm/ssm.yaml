@@ -1,0 +1,157 @@
+########################################
+# Create an SSM enabled EC2 instance
+#
+# This template shows a (basic) EC2 instance creation, and automatically installs the SSM agent. 
+# It also creates an IAM policy and attaches it to an admin user, granting access to the instance via SSH.
+#
+########################################
+AWSTemplateFormatVersion: "2010-09-09"
+Description:  This template creates an EC2 instance with associated SSM role and agent, and places it into a patch window.
+
+Parameters:
+  AdminUser:
+    Description: The adminstrative user that should be granted access to SSM.
+    Type: String
+    Default: "appadmin"
+  AMIID:
+    Description: The base image to use for an EC2 Server. You can find the latest amazon linux 2 AMI by searching AMI's in the marketplace for 'amzn2-ami-hvm-2.0.2020', and picking one.
+    Type: String
+    Default: ami-0b803066d884076ef
+  VpcId:
+    Description: The VPC for egress
+    Type: String
+    Default: vpc-0d1d3f77
+
+Resources:
+  ####################################################
+  #   Basic EC2 setup
+  ####################################################
+  SimpleServer:
+    Type: AWS::EC2::Instance
+    DependsOn: SSMProfile
+    Properties:
+      InstanceType: t3.micro
+      SecurityGroupIds:
+      - Ref: WebSecurityGroup
+      IamInstanceProfile: !Ref SSMProfile
+      ImageId: !Ref AMIID
+      Tags: 
+        - Key: ShouldEcho
+          Value: True
+      SsmAssociations:
+        - AssociationParameters: 
+            - Key: valueToEcho
+              Value: 
+                - "Hello World from CloudFormation initialization!"
+          DocumentName: !Ref EchoDocument
+
+  WebSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Enable encrypted HTTP traffic only (in/out)
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: '443'
+        ToPort: '443'
+        CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+      - IpProtocol: tcp
+        FromPort: '443'
+        ToPort: '443'
+        CidrIp: 0.0.0.0/0
+
+  ####################################################
+  #   Basic SSM setup
+  ####################################################
+
+  SSMProfile:
+    DependsOn: SSMRole
+    Type: AWS::IAM::InstanceProfile
+    Properties: 
+      InstanceProfileName: SSMInstanceProfile
+      Roles: 
+        - !Ref SSMRole
+
+  SSMRole:
+    Type: AWS::IAM::Role
+    Properties: 
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Description: Basic SSM permissions for EC2
+      ManagedPolicyArns: 
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore 
+      RoleName: SSMInstanceProfile
+
+  ####################################################
+  #   Example using SSM automation to do a task
+  ####################################################
+  EchoDocument: 
+    Type: "AWS::SSM::Document"
+    Properties: 
+      Name: "SecurityEchoDocument"
+      DocumentType: Command
+      Content: 
+        schemaVersion: "1.2"
+        description: "Just echo's into a file - to show how SSM works. A real document might check security agents, log config, or hardening attributes."
+        parameters: 
+          valueToEcho: 
+            type: "String"
+            description: "Just a sample parameter"
+            default: "Hello world!"
+        runtimeConfig: 
+          aws:runShellScript:
+            properties:
+              - runCommand:
+                  - echo "{{ valueToEcho }}" >> ssm.txt
+                  - echo "Done with SSM run" >> ssm.txt
+
+  EchoWindow:
+    Type: AWS::SSM::MaintenanceWindow
+    Properties: 
+      AllowUnassociatedTargets: true
+      Cutoff: 1
+      Description: Run Echo documents - our sample automation
+      Duration: 4
+      Name: PatchWindow
+      Schedule: cron(*/5 * * * ? *) # Every 5 mintues for this test. Probably not what you would really want!
+
+  EchoTargets:
+    Type: AWS::SSM::MaintenanceWindowTarget
+    Properties: 
+      Description: Add our server into the maintenance window
+      Name: EchoTargets
+      ResourceType: INSTANCE
+      Targets: 
+      - Key: tag:ShouldEcho
+        Values: 
+        - True
+      WindowId: !Ref EchoWindow
+
+  EchoTask:
+    Type: AWS::SSM::MaintenanceWindowTask
+    Properties: 
+      Description: Echo data on the machine
+      MaxConcurrency: 3
+      MaxErrors: 1
+      Name: EchoTask
+      Priority: 5
+      Targets: 
+      - Key: WindowTargetIds
+        Values: 
+        - !Ref EchoTargets
+      TaskArn: !Ref EchoDocument
+      TaskType: RUN_COMMAND
+      TaskInvocationParameters:
+        MaintenanceWindowRunCommandParameters:
+          Parameters:
+            valueToEcho:
+              - "Hello World from the maintenance window!"
+      WindowId: !Ref EchoWindow
