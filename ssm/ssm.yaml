@@ -48,18 +48,63 @@ Resources:
   WebSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupDescription: Enable encrypted HTTP traffic only (in/out)
+      GroupDescription: Enable encrypted HTTP traffic only from outside, all outbound traffic OK.
       VpcId: !Ref VpcId
       SecurityGroupIngress:
       - IpProtocol: tcp
         FromPort: '443'
         ToPort: '443'
         CidrIp: 0.0.0.0/0
-      SecurityGroupEgress:
-      - IpProtocol: tcp
-        FromPort: '443'
-        ToPort: '443'
-        CidrIp: 0.0.0.0/0
+
+  ####################################################
+  #   An RDS instance with secure password, open only to the EC2 server
+  ####################################################
+
+  DBPassword:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Description: A secure password for our DB
+      GenerateSecretString:
+        IncludeSpace: False
+        PasswordLength: 32
+        ExcludeCharacters: '\/@"'
+      Name: echo-db-pass
+
+  RDSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Enable access from EC2 only
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - SourceSecurityGroupId: !Ref WebSecurityGroup
+          IpProtocol: -1
+
+  DBIngressRule:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref RDSSecurityGroup
+      IpProtocol: tcp
+      FromPort: 5432
+      ToPort: 5432
+      SourceSecurityGroupId: !Ref WebSecurityGroup
+
+  Database:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBName: EchoDB
+      DBInstanceIdentifier: EchoDB-Dev
+      AllocatedStorage: 5
+      AutoMinorVersionUpgrade: true
+      BackupRetentionPeriod: 0
+      DBInstanceClass: db.t3.micro
+      VPCSecurityGroups:
+        - !Ref RDSSecurityGroup
+      Engine: postgres
+      EngineVersion: 10.6
+      PubliclyAccessible: False
+      MasterUsername: master
+      MasterUserPassword: !Join ['', ['{{resolve:secretsmanager:', !Ref DBPassword, ':SecretString}}']]
+
 
   ####################################################
   #   Basic SSM setup
