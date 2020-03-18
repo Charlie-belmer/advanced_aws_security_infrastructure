@@ -1,7 +1,7 @@
 ########################################
 # Create an SSM enabled EC2 instance
 #
-# This template shows a (basic) EC2 instance creation, and automatically installs the SSM agent. 
+# This template shows a (basic) EC2 instance creation with associated RDS, and automatically installs the SSM agent. 
 # It also creates an IAM policy and attaches it to an admin user, granting access to the instance via SSH.
 #
 ########################################

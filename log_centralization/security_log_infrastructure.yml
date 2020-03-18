@@ -1,0 +1,194 @@
+---
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Capture custom logs from all accounts into a central security account'
+
+# Setup infrastructure to ingest logs from any number
+# of other accounts, and store them in an S3 bucket
+
+Parameters:
+  LogBucketName:
+    Type: String
+    Description: Name of the bucket we will store logs in
+    Default: secops-nullsweep-security-logs
+  AppAccountIDs:
+    Type: String
+    Description: 'List of VPC IDs that should be able to write to the central bucket. format should be quoted IDs and comma separated: "1234", "5678"'
+    Default: '"123456789", "987654321"'
+
+Resources:
+
+  #####################################################
+  # Roles for log ingestion
+  #####################################################
+  IngestionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: security-log-writer
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service: !Sub "logs.${AWS::Region}.amazonaws.com"
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service: firehose.amazonaws.com
+            Condition:
+              StringEquals:
+                sts:ExternalId: !Sub "${AWS::AccountId}"
+
+  IngestionRolePolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: security-log-writer-policy
+      Roles:
+        - !Ref IngestionRole
+      PolicyDocument:
+        Statement:
+          - Sid: KinesisReadWrite
+            Action:
+              - kinesis:Describe*
+              - kinesis:Get*
+              - kinesis:List*
+              - kinesis:Subscribe*
+              - kinesis:PutRecord
+            Effect: Allow
+            Resource: !Sub "arn:aws:kinesis:${AWS::Region}:${AWS::AccountId}:stream/secops-*" # Namespacing this role for things named secops
+          - Sid: S3ReadWrite
+            Action:
+              - s3:Get*
+              - s3:Put*
+              - s3:List*
+            Effect: Allow
+            Resource: # Namespace to assets starting with "secops"
+              - "arn:aws:s3:::secops-*"
+              - "arn:aws:s3:::secops-*/*"
+          - Sid: Passrole
+            Action:
+              - iam:PassRole
+            Effect: Allow
+            Resource: !GetAtt IngestionRole.Arn
+
+  #####################################################
+  # Infrastructure
+  #####################################################
+  KMSKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: Symmetric CMK
+      KeyPolicy:
+        Version: '2012-10-17'
+        Id: key-default-1
+        Statement:
+        - Sid: KeyOwner
+          Effect: Allow
+          Principal:
+            AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
+          Action: kms:*
+          Resource: '*'
+        - Sid: KeyUser
+          Effect: Allow
+          Principal:
+            AWS: !GetAtt IngestionRole.Arn
+          Action: kms:*
+          Resource: '*'
+
+  LogBucket:
+    Type: AWS::S3::Bucket
+    Properties: 
+      BucketName: !Ref LogBucketName
+      # Prevent public access
+      PublicAccessBlockConfiguration:
+        BlockPublicPolicy: True
+        BlockPublicAcls: True
+        IgnorePublicAcls: True
+        RestrictPublicBuckets: True
+      # Encrypt the bucket - may also want to use KMS instead
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
+  LogBucketPolicy:
+    Type: AWS::S3::BucketPolicy 
+    DependsOn: LogBucket
+    Properties:
+      Bucket: !Ref LogBucket
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Action:
+            - S3:GetObject
+            - S3:PutObject
+            Effect: Allow
+            Resource: !Sub "arn:aws:s3:::${LogBucketName}/*"
+            Principal:
+              AWS: !GetAtt IngestionRole.Arn
+            Condition:
+              Bool:
+                aws:SecureTransport: True
+
+  #####################################################
+  # Now the ingestion stream:
+  #   log -> cloudwatch - subscription ->
+  #     destination -> kinesis stream -> firehose -> S3
+  #####################################################
+
+  LogDestination:
+    Type: AWS::Logs::Destination
+    DependsOn: Stream
+    Properties: 
+      DestinationName: SecurityLogDestination
+      DestinationPolicy: 
+        !Join
+          - ''
+          - - '{'
+            - '    "Version" : "2012-10-17",'
+            - '    "Statement" : ['
+            - '      {'
+            - '        "Sid" : "",'
+            - '        "Effect" : "Allow",'
+            - '        "Principal" : {'
+            - '          "AWS" : ['
+            - !Ref AppAccountIDs
+            - '           ]'
+            - '        },'
+            - '        "Action" : "logs:PutSubscriptionFilter",'
+            - !Sub '        "Resource" : "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:destination:SecurityLogDestination"'
+            - '      }'
+            - '    ]'
+            - '  }'
+      RoleArn: !GetAtt IngestionRole.Arn
+      TargetArn: !GetAtt Stream.Arn
+
+  Stream:
+    Type: AWS::Kinesis::Stream
+    Properties: 
+      Name: secops-SecurityLogStream
+      ShardCount: 1
+      StreamEncryption: 
+        EncryptionType: KMS
+        KeyId: !Ref KMSKey
+
+  Firehose:
+    Type: AWS::KinesisFirehose::DeliveryStream
+    Properties: 
+      DeliveryStreamName: secops-SecurityLogFirehose
+      DeliveryStreamType: KinesisStreamAsSource
+      KinesisStreamSourceConfiguration: 
+        KinesisStreamARN: !GetAtt Stream.Arn
+        RoleARN: !GetAtt IngestionRole.Arn
+      S3DestinationConfiguration: 
+        BucketARN: !GetAtt LogBucket.Arn
+        BufferingHints: 
+          IntervalInSeconds: 300
+          SizeInMBs: 5
+        CompressionFormat: GZIP
+        EncryptionConfiguration: 
+          KMSEncryptionConfig: 
+            AWSKMSKeyARN: !GetAtt KMSKey.Arn
+        RoleARN: !GetAtt IngestionRole.Arn
+

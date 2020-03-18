@@ -1,0 +1,26 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Template to create s3 buckets for splunk and other logs.
+
+Parameters:
+  SecurityAccountID:
+    Type: String
+    Description: The account ID of the security account
+    Default: "631257118583"
+  SecurityDestinationRegion:
+    Type: String
+    Description: The region where the destination was created in the security account
+    Default: us-east-1
+
+Resources:
+  ApplicationLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties: 
+      LogGroupName: 'logs-for-security-ingestion'
+      RetentionInDays: 3653
+
+  ApplicationLogSubscription:
+    Type: AWS::Logs::SubscriptionFilter
+    Properties:
+      DestinationArn: !Sub "arn:aws:logs:${SecurityDestinationRegion}:${SecurityAccountID}:destination:SecurityLogDestination"
+      FilterPattern: ''  # Retrieve all log data from group.
+      LogGroupName: !Ref ApplicationLogGroup
